@@ -85,8 +85,6 @@ const COLORS = {
   muted: rgb(0.4, 0.43, 0.48),
   border: rgb(0.62, 0.65, 0.7),
   headFill: rgb(0.94, 0.95, 0.96),
-  strong: rgb(0.2, 0.22, 0.26),
-  white: rgb(1, 1, 1),
   brand: rgb(0.95, 0.45, 0.08),
   logoGrey: rgb(0.36, 0.38, 0.42)
 };
@@ -482,8 +480,7 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
   c.rect(margin, y, contentWidth, lineH, { fill: COLORS.headFill });
   c.rect(margin, y, contentWidth, tableH, { border: COLORS.border });
   c.hline(margin, right, y - lineH);
-  // Heavier rule above the totals row so it reads as a total, not another header.
-  c.hline(margin, right, y - lineH * (lines + 1), COLORS.strong, 0.9);
+  c.hline(margin, right, y - lineH * (lines + 1));
   [...earnCols.slice(1), ...dedCols].forEach(({ x }) => c.vline(x, y, y - tableH));
   const earnHead = showRate ? ["Earnings", "Full Month", "Earned"] : ["Earnings", "Amount (INR)"];
   earnHead.forEach((label, i) => c.cell(label, earnCols[i].x, y, earnCols[i].w, lineH, { font: bold, align: i ? "right" : "left" }));
@@ -504,26 +501,26 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
     }
     lineTop -= lineH;
   }
-  c.cell("Total Earnings (A)", earnCols[0].x, lineTop, earnCols[0].w, lineH, { font: bold });
+  c.cell("Total Earnings", earnCols[0].x, lineTop, earnCols[0].w, lineH, { font: bold });
   if (showRate) c.cell(amount(totalRate), earnCols[1].x, lineTop, earnCols[1].w, lineH, { font: bold, align: "right" });
   const lastEarn = earnCols[earnCols.length - 1];
   c.cell(amount(totalEarnings), lastEarn.x, lineTop, lastEarn.w, lineH, { font: bold, align: "right" });
-  c.cell("Total Deductions (B)", dedCols[0].x, lineTop, dedCols[0].w, lineH, { font: bold });
+  c.cell("Total Deductions", dedCols[0].x, lineTop, dedCols[0].w, lineH, { font: bold });
   c.cell(amount(totalDeductions), dedCols[1].x, lineTop, dedCols[1].w, lineH, { font: bold, align: "right" });
   y -= tableH;
 
-  // ── Net pay summary ────────────────────────────────────────────────────
+  // ── Net pay summary (same label/value grid style as the employee details) ──
   const netH = 22;
   const wordsH = 17;
   y -= 10;
-  c.rect(margin, y, contentWidth, netH, { fill: COLORS.strong });
-  c.cell("Net Pay (A - B)", margin, y, half, netH, { size: 10, font: bold, color: COLORS.white });
-  c.cell(`INR ${amount(input.netPay)}`, margin + half, y, half, netH, { size: 11, font: bold, color: COLORS.white, align: "right" });
-  c.rect(margin, y - netH, labelW, wordsH, { fill: COLORS.headFill });
-  c.rect(margin, y, contentWidth, netH + wordsH, { border: COLORS.strong, borderWidth: 0.8 });
-  c.vline(margin + labelW, y - netH, y - netH - wordsH);
+  c.rect(margin, y, labelW, netH + wordsH, { fill: COLORS.headFill });
+  c.rect(margin, y, contentWidth, netH + wordsH, { border: COLORS.border });
+  c.hline(margin, right, y - netH);
+  c.vline(margin + labelW, y, y - netH - wordsH);
+  c.cell("Net Pay", margin, y, labelW, netH, { size: 9.5, font: bold });
+  c.cell(`INR ${amount(input.netPay)}`, margin + labelW, y, contentWidth - labelW, netH, { size: 11, font: bold });
   c.cell("Amount in Words", margin, y - netH, labelW, wordsH, { size: 8, font: bold, color: COLORS.muted });
-  c.cell(inrWords(input.netPay), margin + labelW, y - netH, contentWidth - labelW, wordsH, { size: 8.5, font: bold });
+  c.cell(inrWords(input.netPay), margin + labelW, y - netH, contentWidth - labelW, wordsH, { size: 8.5 });
   y -= netH + wordsH + 14;
 
   // ── Employer contributions ─────────────────────────────────────────────
@@ -535,7 +532,7 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
     c.rect(margin, y, ecW, ecH, { fill: COLORS.headFill });
     c.rect(margin, y, ecW, ecTableH, { border: COLORS.border });
     c.hline(margin, margin + ecW, y - ecH);
-    c.hline(margin, margin + ecW, y - ecH * (employerItems.length + 1), COLORS.strong, 0.9);
+    c.hline(margin, margin + ecW, y - ecH * (employerItems.length + 1));
     c.vline(margin + ecW - amtW, y, y - ecTableH);
     c.cell("Contribution", margin, y, ecW - amtW, ecH, { font: bold });
     c.cell("Amount (INR)", margin + ecW - amtW, y, amtW, ecH, { font: bold, align: "right" });
