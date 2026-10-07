@@ -24,7 +24,12 @@ export type PayDocumentInput = {
   payslipTitle?: string;
   contractorStatementTitle?: string;
   footerText?: string;
-  /** @deprecated Payslips are computer-generated and carry no signature block; kept for call-site compatibility. */
+  /**
+   * Adds a "for {company} / Authorised Signatory" block for a copy HR will sign and stamp
+   * (bank loans, visas). Off by default: standard payslips are computer-generated and unsigned.
+   */
+  includeSignature?: boolean;
+  /** Signatory title printed under the signature line when `includeSignature` is set. */
   authorisedSignatory?: string;
   showAttendance?: boolean;
   periodLabel: string;
@@ -459,7 +464,9 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
 
   const lineH = 15;
   // Everything below the line items (net pay rows, employer table, footer) needs this much room.
-  const reserved = lineH * 3 + 12 + (employerItems.length ? 14 * (employerItems.length + 2) + 25 : 0) + 60;
+  const employerBlockH = employerItems.length ? 14 * (employerItems.length + 2) + 25 : 0;
+  const signatureBlockH = input.includeSignature ? 70 : 0;
+  const reserved = lineH * 3 + 12 + Math.max(employerBlockH, signatureBlockH) + 60;
   const maxLines = Math.max(4, Math.floor((y - reserved - lineH * 2) / lineH));
   const earningRows = capRows(earnings, maxLines, "Other Earnings");
   const deductionRows = capRows(deductions, maxLines, "Other Deductions");
@@ -523,7 +530,8 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
   c.cell(inrWords(input.netPay), margin + labelW, y - netH, contentWidth - labelW, wordsH, { size: 8.5 });
   y -= netH + wordsH + 14;
 
-  // ── Employer contributions ─────────────────────────────────────────────
+  // ── Employer contributions (left) and optional signature (right) ───────
+  const blockTop = y;
   if (employerItems.length) {
     const ecH = 14;
     const ecW = half;
@@ -547,10 +555,23 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
     y -= ecTableH + 12;
   }
 
+  if (input.includeSignature) {
+    const signW = half - 20;
+    c.text(`For ${company.toUpperCase()}`, right, blockTop - 8, { size: 9, font: bold, align: "right", maxWidth: signW });
+    // Space for a hand signature and company stamp.
+    c.hline(right - 150, right, blockTop - 52);
+    c.text(input.authorisedSignatory || "Authorised Signatory", right, blockTop - 63, { size: 8.5, align: "right", maxWidth: signW });
+    y = Math.min(y, blockTop - signatureBlockH);
+  }
+
   // ── Footer ─────────────────────────────────────────────────────────────
   const footerY = 30;
   c.hline(margin, right, footerY + 12, COLORS.border, 0.5);
-  const footerText = input.footerText || `This is a computer-generated ${isEmployee ? "payslip" : "statement"} and does not require a signature.`;
+  const docNoun = isEmployee ? "payslip" : "statement";
+  const footerText = input.footerText
+    || (input.includeSignature
+      ? `This ${docNoun} is valid only with the authorised signatory's signature and company seal.`
+      : `This is a computer-generated ${docNoun} and does not require a signature.`);
   wrap(safe(footerText), regular, 7, contentWidth - 205)
     .slice(0, 2)
     .forEach((lineText, index) => c.text(lineText, margin, footerY - index * 9, { size: 7, color: COLORS.muted }));

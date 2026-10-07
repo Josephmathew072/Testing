@@ -15,6 +15,14 @@ describe("pay documents", () => {
     expect(pdf.getPageCount()).toBe(1);
   });
 
+  it("adds a signature block only when requested", async () => {
+    const base = { companyName: "DropX Logistics", periodLabel: "August 2026", periodStart: "2026-08-01", periodEnd: "2026-08-31", documentNumber: "PAY-202608-D0888", workerType: "employee" as const, workerCode: "D0888", workerName: "Test Employee", locationName: null, departmentName: null, designationName: null, paymentBasis: null, expectedDays: 31, presentDays: 27, paidLeaveDays: 0, absenceDays: 0, halfDays: 0, weekoffDays: 4, grossPay: 30000, statutoryDeductions: 1800, attendanceDeductions: 0, otherDeductions: 0, employerContributions: 1800, netPay: 28200, earnings: [{ name: "Basic", amount: 30000 }], deductions: [{ name: "PF", amount: 1800 }], publishedAt: "2026-08-31T12:00:00Z" };
+    const unsigned = Buffer.from(await createPayDocumentPdf(base)).toString("latin1");
+    const signed = Buffer.from(await createPayDocumentPdf({ ...base, includeSignature: true, authorisedSignatory: "HR Head" })).toString("latin1");
+    expect(signed.length).toBeGreaterThan(unsigned.length);
+    expect((await PDFDocument.load(Buffer.from(signed, "latin1"))).getPageCount()).toBe(1);
+  });
+
   it("keeps many line items on a single page", async () => {
     const earnings = Array.from({ length: 40 }, (_, i) => ({ name: `Allowance ${i + 1}`, amount: 100 }));
     const bytes = await createPayDocumentPdf({ companyName: "DropX Logistics", registeredAddress: "23/337, Koodathingal Warehouse\nNeythukulangara Jn, Chevayur\nKozhikode, Kerala - 673017", periodLabel: "September 2026", periodStart: "2026-09-01", periodEnd: "2026-09-30", documentNumber: "PAY-202609-D0001", workerType: "employee", workerCode: "D0001", workerName: "Many Lines", locationName: null, departmentName: null, designationName: null, paymentBasis: null, expectedDays: 30, presentDays: 26, paidLeaveDays: 0, absenceDays: 0, halfDays: 0, weekoffDays: 4, grossPay: 4000, statutoryDeductions: 0, attendanceDeductions: 0, otherDeductions: 0, employerContributions: 0, netPay: 4000, earnings, deductions: [], salaryVersionsLabel: "V1 2026-09-01 → 2026-09-14 @ 20,000; V2 2026-09-15 → open @ 24,500", publishedAt: "2026-09-30T12:00:00Z" });
