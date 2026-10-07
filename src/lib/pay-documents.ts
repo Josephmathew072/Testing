@@ -1,6 +1,12 @@
 import { PDFDocument, PDFFont, PDFPage, RGB, StandardFonts, rgb } from "pdf-lib";
 
-export type PayLineItem = { name: string; amount: number };
+export type PayLineItem = {
+  name: string;
+  /** Amount actually paid / deducted this period. */
+  amount: number;
+  /** Full-month (un-prorated) rate. When any earning has one, a "Full Month" column is shown. */
+  rate?: number | null;
+};
 
 export type SalaryVersion = {
   /** Display label such as "V1". Defaults to V{index + 1}. */
@@ -18,6 +24,7 @@ export type PayDocumentInput = {
   payslipTitle?: string;
   contractorStatementTitle?: string;
   footerText?: string;
+  /** @deprecated Payslips are computer-generated and carry no signature block; kept for call-site compatibility. */
   authorisedSignatory?: string;
   showAttendance?: boolean;
   periodLabel: string;
@@ -79,7 +86,6 @@ const COLORS = {
   border: rgb(0.62, 0.65, 0.7),
   headFill: rgb(0.94, 0.95, 0.96),
   brand: rgb(0.95, 0.45, 0.08),
-  brandSoft: rgb(1, 0.95, 0.9),
   logoGrey: rgb(0.36, 0.38, 0.42)
 };
 
@@ -245,7 +251,12 @@ class Canvas {
   }
 }
 
-/** DropX letterhead payslip / contractor payment statement in a bordered, Tally-style layout. */
+/**
+ * DropX payslip / contractor payment statement, following the layout used by large Indian
+ * employers' payroll systems (ADP, Workday, greytHR): letterhead, title bar, ruled employee
+ * grid, attendance, side-by-side earnings and deductions, Net Pay with amount in words,
+ * employer contributions, and a "computer-generated, no signature required" footer.
+ */
 export async function createPayDocumentPdf(input: PayDocumentInput) {
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
@@ -257,14 +268,21 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
   const margin = 36;
   const right = width - margin;
   const contentWidth = right - margin;
+  const half = contentWidth / 2;
   const isEmployee = input.workerType === "employee";
   const company = safe(input.companyName) || "DROPX LOGISTICS";
 
-  const title = safe(isEmployee ? input.payslipTitle || "Payslip" : input.contractorStatementTitle || "Payment Statement");
-  pdf.setTitle(`${title} - ${safe(input.workerName)} - ${safe(input.periodLabel)}`);
+  const docType = safe(isEmployee ? input.payslipTitle || "Payslip" : input.contractorStatementTitle || "Payment Statement");
+  pdf.setTitle(`${docType} - ${safe(input.workerName)} - ${safe(input.periodLabel)}`);
   pdf.setAuthor(company);
   pdf.setSubject(safe(input.documentNumber));
   pdf.setCreator(company);
+
+  /** Small uppercase heading above a table. */
+  const sectionHeading = (label: string) => {
+    c.text(label.toUpperCase(), margin, y - 8, { size: 7.5, font: bold, color: COLORS.muted });
+    y -= 13;
+  };
 
   // ── Letterhead ──────────────────────────────────────────────────────────
   let y = height - 48;
@@ -300,130 +318,128 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
     c.text(lineText, margin, y, { size: 8.5, color: COLORS.muted, maxWidth: 330 });
     y -= 11;
   }
-  y = Math.min(y, height - 48 - logoHeight) - 4;
-  c.hline(margin, right, y, COLORS.brand, 1.6);
+  y = Math.min(y, height - 48 - logoHeight) - 6;
 
-  // ── Title ───────────────────────────────────────────────────────────────
-  y -= 22;
-  c.text(title, width / 2, y, { size: 15, font: bold, align: "center" });
-  y -= 14;
-  c.text(`for the month of ${input.periodLabel}`, width / 2, y, { size: 9, font: bold, color: COLORS.ink, align: "center" });
-  y -= 12;
-  c.text(`${formatDate(input.periodStart)} to ${formatDate(input.periodEnd)}`, width / 2, y, { size: 8.5, color: COLORS.muted, align: "center" });
-  y -= 14;
+  // ── Title bar ───────────────────────────────────────────────────────────
+  const titleH = 22;
+  c.rect(margin, y, contentWidth, titleH, { fill: COLORS.headFill, border: COLORS.border });
+  c.cell(`${docType} for the month of ${input.periodLabel}`, margin, y, contentWidth, titleH, { size: 11, font: bold, align: "center" });
+  y -= titleH + 10;
 
-  // ── Worker details ──────────────────────────────────────────────────────
-  const rowH = 15;
-  const half = contentWidth / 2;
-  const nameBarH = 20;
-  const leftPairs: Array<[string, string]> = [
-    [isEmployee ? "Employee Number" : "Contractor ID", input.workerCode || "-"],
-    ["Function", input.departmentName || "-"],
+  // ── Employee details (fully ruled key/value grid) ──────────────────────
+  const rowH = 16;
+  const labelW = 112;
+  const identityPairs: Array<[string, string]> = [
+    [isEmployee ? "Employee Name" : "Contractor Name", input.workerName || "-"],
+    [isEmployee ? "Employee ID" : "Contractor ID", input.workerCode || "-"],
     ["Designation", input.designationName || "-"],
+    ["Department", input.departmentName || "-"],
     ["Location", input.locationName || "-"],
-    ["Bank Details", input.bankDetails || "-"],
-    ["Date of Joining", formatDate(input.dateOfJoining) || "-"]
+    ["Date of Joining", formatDate(input.dateOfJoining) || "-"],
+    ["Bank Account", input.bankDetails || "-"]
   ];
   // Optional statutory fields (Tax Regime, PRAN) are hidden rather than shown as blank placeholders.
   // Contractors are not covered by PF/ESI, so those rows only appear for them when a value exists.
   const statutoryRow = (label: string, value: string | null | undefined): Array<[string, string]> =>
     isEmployee || value?.trim() ? [[label, value?.trim() || "-"]] : [];
   const regime = taxRegimeLabel(input.taxRegime);
-  const rightPairs: Array<[string, string]> = [
-    ...(regime ? [["Tax Regime", regime] as [string, string]] : []),
-    ["Income Tax Number (PAN)", input.panNumber || "-"],
-    ...statutoryRow("Universal Account No. (UAN)", input.pfUan),
+  const statutoryPairs: Array<[string, string]> = [
+    ["Pay Period", `${formatDate(input.periodStart)} to ${formatDate(input.periodEnd)}`],
+    ["PAN", input.panNumber || "-"],
+    ...statutoryRow("UAN", input.pfUan),
     ...statutoryRow("PF Account Number", input.pfAccountNo),
     ...statutoryRow("ESI Number", input.esiNo),
-    ...(input.pran?.trim() ? [["PR Account Number (PRAN)", input.pran.trim()] as [string, string]] : [])
+    ...(regime ? [["Tax Regime", regime] as [string, string]] : []),
+    ...(input.pran?.trim() ? [["PRAN", input.pran.trim()] as [string, string]] : [])
   ];
-  const detailRows = Math.max(leftPairs.length, rightPairs.length);
-  const detailsH = nameBarH + detailRows * rowH + 6;
-  c.rect(margin, y, contentWidth, detailsH, { border: COLORS.border });
-  c.rect(margin, y, contentWidth, nameBarH, { fill: COLORS.headFill });
-  c.hline(margin, right, y - nameBarH);
-  c.cell(input.workerName, margin, y, contentWidth, nameBarH, { size: 11, font: bold });
-  c.cell(isEmployee ? "Employee" : "Contractor", margin, y, contentWidth, nameBarH, { size: 8, color: COLORS.muted, align: "right" });
-  c.vline(margin + half, y - nameBarH, y - detailsH);
-  const drawPair = ([label, value]: [string, string], x: number, top: number, labelW: number) => {
-    c.cell(label, x, top, labelW, rowH, { size: 8, color: COLORS.muted });
-    c.text(":", x + labelW, top - rowH / 2 - 2.8, { size: 8, color: COLORS.muted });
-    c.cell(value, x + labelW + 2, top, half - labelW - 2, rowH, { size: 8.5 });
-  };
-  let rowTop = y - nameBarH - 3;
+  // Flow all fields evenly across both columns so contractors (fewer statutory rows) get no empty cells.
+  const allPairs = [...identityPairs, ...statutoryPairs];
+  const detailRows = Math.ceil(allPairs.length / 2);
+  const leftPairs = allPairs.slice(0, detailRows);
+  const rightPairs = allPairs.slice(detailRows);
+  const detailsH = detailRows * rowH;
+  const pairCols = [margin, margin + labelW, margin + half, margin + half + labelW];
   for (let i = 0; i < detailRows; i += 1) {
-    if (leftPairs[i]) drawPair(leftPairs[i], margin, rowTop, 92);
-    if (rightPairs[i]) drawPair(rightPairs[i], margin + half, rowTop, 122);
-    rowTop -= rowH;
+    c.rect(margin, y - i * rowH, labelW, rowH, { fill: COLORS.headFill });
+    if (rightPairs[i]) c.rect(margin + half, y - i * rowH, labelW, rowH, { fill: COLORS.headFill });
   }
-  y -= detailsH + 10;
+  c.rect(margin, y, contentWidth, detailsH, { border: COLORS.border });
+  pairCols.slice(1).forEach((x) => c.vline(x, y, y - detailsH));
+  for (let i = 0; i < detailRows; i += 1) {
+    const top = y - i * rowH;
+    if (i) c.hline(margin, right, top);
+    const l = leftPairs[i];
+    const r = rightPairs[i];
+    if (l) {
+      c.cell(l[0], pairCols[0], top, labelW, rowH, { size: 8, font: bold, color: COLORS.muted });
+      c.cell(l[1], pairCols[1], top, half - labelW, rowH, { size: 8.5, font: i === 0 ? bold : regular });
+    }
+    if (r) {
+      c.cell(r[0], pairCols[2], top, labelW, rowH, { size: 8, font: bold, color: COLORS.muted });
+      c.cell(r[1], pairCols[3], top, half - labelW, rowH, { size: 8.5 });
+    }
+  }
+  y -= detailsH + 12;
 
-  // ── Attendance summary ─────────────────────────────────────────────────
+  // ── Attendance details ─────────────────────────────────────────────────
   if (input.showAttendance !== false) {
     const wfh = Number(input.wfhDays || 0);
     const weekoff = Number(input.weekoffDays || 0);
     const payable = input.payableDays ?? input.presentDays + input.halfDays * 0.5 + input.paidLeaveDays + weekoff;
     const cols: Array<[string, string]> = [
-      ["Working Days", days(input.expectedDays)],
+      ["Total Days", days(input.expectedDays)],
       ["Present", days(input.presentDays)],
       ["Half Days", days(input.halfDays)],
       ["Paid Leave", days(Math.max(0, input.paidLeaveDays - wfh))],
       ["WFH", days(wfh)],
       ["Week Off", days(weekoff)],
-      ["Absent / LOP", days(input.absenceDays)],
+      ["LOP Days", days(input.absenceDays)],
       ["Paid Days", days(payable)]
     ];
-    const headH = 14;
-    const valH = 18;
+    const headH = 15;
+    const valH = 17;
     const colW = contentWidth / cols.length;
-    c.text("ATTENDANCE SUMMARY", margin, y - 8, { size: 7.5, font: bold, color: COLORS.muted });
-    y -= 13;
+    sectionHeading("Attendance Details");
     c.rect(margin, y, contentWidth, headH, { fill: COLORS.headFill });
-    // Highlight the column that actually drives pay.
-    c.rect(margin + colW * (cols.length - 1), y, colW, headH + valH, { fill: COLORS.brandSoft });
     c.rect(margin, y, contentWidth, headH + valH, { border: COLORS.border });
     c.hline(margin, right, y - headH);
     cols.forEach(([label, value], index) => {
       const x = margin + colW * index;
       if (index) c.vline(x, y, y - headH - valH);
       const isPaid = index === cols.length - 1;
-      c.cell(label, x, y, colW, headH, { size: 7.5, font: bold, color: isPaid ? COLORS.ink : COLORS.muted, align: "center" });
-      c.cell(value, x, y - headH, colW, valH, { size: 10, font: isPaid ? bold : regular, align: "center" });
+      c.cell(label, x, y, colW, headH, { size: 7.5, font: bold, align: "center" });
+      c.cell(value, x, y - headH, colW, valH, { size: 9, font: isPaid ? bold : regular, align: "center" });
     });
-    y -= headH + valH + 10;
+    y -= headH + valH + 12;
   }
 
-  // ── Salary revisions (only when pay changed mid-period) ────────────────
+  // ── Salary revision (only when pay changed mid-period) ─────────────────
   const versions = input.salaryVersions?.length ? input.salaryVersions : parseSalaryVersionsLabel(input.salaryVersionsLabel);
   if (versions.length > 1) {
     const shown = versions.slice(0, 4);
-    const headH = 14;
-    const verRowH = 14;
-    const widths = [60, 230, contentWidth - 290];
+    const headH = 15;
+    const verRowH = 15;
+    const widths = [70, 250, contentWidth - 320];
     const xs = [margin, margin + widths[0], margin + widths[0] + widths[1]];
-    c.text("SALARY REVISED DURING THIS PERIOD - EARNINGS ARE PRO-RATED", margin, y - 8, { size: 7.5, font: bold, color: COLORS.muted });
-    y -= 13;
+    sectionHeading("Salary Revision Details (earnings pro-rated)");
     const tableH = headH + shown.length * verRowH;
     c.rect(margin, y, contentWidth, headH, { fill: COLORS.headFill });
     c.rect(margin, y, contentWidth, tableH, { border: COLORS.border });
     c.hline(margin, right, y - headH);
-    ["Version", "Effective Period", isEmployee ? "Monthly Salary (INR)" : "Monthly Rate (INR)"].forEach((label, i) => {
-      c.cell(label, xs[i], y, widths[i], headH, { size: 7.5, font: bold, color: COLORS.muted, align: i === 2 ? "right" : "left" });
+    ["Revision", "Effective Period", isEmployee ? "Monthly Gross (INR)" : "Monthly Rate (INR)"].forEach((label, i) => {
+      c.cell(label, xs[i], y, widths[i], headH, { size: 8, font: bold, align: i === 2 ? "right" : "left" });
     });
     xs.slice(1).forEach((x) => c.vline(x, y, y - tableH));
     let vTop = y - headH;
     shown.forEach((version, index) => {
-      const period = `${formatDate(version.effectiveFrom)} to ${version.effectiveTo ? formatDate(version.effectiveTo) : "present"}`;
-      c.cell(version.label || `V${index + 1}`, xs[0], vTop, widths[0], verRowH, { size: 8.5 });
-      c.cell(period, xs[1], vTop, widths[1], verRowH, { size: 8.5 });
-      c.cell(amount(version.monthlyAmount), xs[2], vTop, widths[2], verRowH, { size: 8.5, align: "right" });
+      if (index) c.hline(margin, right, vTop);
+      const period = `${formatDate(version.effectiveFrom)} to ${version.effectiveTo ? formatDate(version.effectiveTo) : formatDate(input.periodEnd)}`;
+      c.cell(version.label || `V${index + 1}`, xs[0], vTop, widths[0], verRowH);
+      c.cell(period, xs[1], vTop, widths[1], verRowH);
+      c.cell(amount(version.monthlyAmount), xs[2], vTop, widths[2], verRowH, { align: "right" });
       vTop -= verRowH;
     });
-    y -= tableH + 10;
-  } else if (!versions.length && input.salaryVersionsLabel?.trim()) {
-    // Unrecognised free-text label: show it as a quiet note instead of dropping it.
-    c.text(`Note: ${input.salaryVersionsLabel}`, margin, y - 8, { size: 7.5, font: italic, color: COLORS.muted, maxWidth: contentWidth });
-    y -= 16;
+    y -= tableH + 12;
   }
 
   // ── Earnings & deductions ──────────────────────────────────────────────
@@ -432,7 +448,7 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
     ? input.deductions
     : [
         ...(input.statutoryDeductions ? [{ name: "Statutory Deductions", amount: input.statutoryDeductions }] : []),
-        ...(input.attendanceDeductions ? [{ name: "Attendance Deduction", amount: input.attendanceDeductions }] : []),
+        ...(input.attendanceDeductions ? [{ name: "Loss of Pay", amount: input.attendanceDeductions }] : []),
         ...(input.otherDeductions ? [{ name: "Other Deductions", amount: input.otherDeductions }] : [])
       ];
   const employerItems = input.employerItems?.length
@@ -441,93 +457,99 @@ export async function createPayDocumentPdf(input: PayDocumentInput) {
       ? [{ name: "Employer Contribution", amount: input.employerContributions }]
       : [];
 
-  // Everything below the line items needs roughly this much room above the footer.
-  const reserved = 52 + 30 + (employerItems.length ? 14 * (employerItems.length + 2) + 12 : 0) + 70;
   const lineH = 15;
+  // Everything below the line items (net pay rows, employer table, footer) needs this much room.
+  const reserved = lineH * 3 + 12 + (employerItems.length ? 14 * (employerItems.length + 2) + 25 : 0) + 60;
   const maxLines = Math.max(4, Math.floor((y - reserved - lineH * 2) / lineH));
   const earningRows = capRows(earnings, maxLines, "Other Earnings");
   const deductionRows = capRows(deductions, maxLines, "Other Deductions");
   const lines = Math.max(earningRows.length, deductionRows.length, 1);
   const totalEarnings = earningRows.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const totalDeductions = deductionRows.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  // "Full month" rate column, shown only when the caller supplies rates (standard on MNC payslips).
+  const showRate = earningRows.some((item) => item.rate != null);
+  const totalRate = earningRows.reduce((sum, item) => sum + Number(item.rate ?? item.amount ?? 0), 0);
 
-  const amtW = 88;
-  const nameW = half - amtW;
-  const colX = [margin, margin + nameW, margin + half, margin + half + nameW];
+  const amtW = 80;
+  const earnCols = showRate
+    ? [{ x: margin, w: half - 140 }, { x: margin + half - 140, w: 70 }, { x: margin + half - 70, w: 70 }]
+    : [{ x: margin, w: half - amtW }, { x: margin + half - amtW, w: amtW }];
+  const dedCols = [{ x: margin + half, w: half - amtW }, { x: right - amtW, w: amtW }];
   const tableH = lineH * (lines + 2);
+  sectionHeading("Salary Details");
   c.rect(margin, y, contentWidth, lineH, { fill: COLORS.headFill });
   c.rect(margin, y - lineH * (lines + 1), contentWidth, lineH, { fill: COLORS.headFill });
   c.rect(margin, y, contentWidth, tableH, { border: COLORS.border });
   c.hline(margin, right, y - lineH);
   c.hline(margin, right, y - lineH * (lines + 1));
-  colX.slice(1).forEach((x) => c.vline(x, y, y - tableH, COLORS.border, x === margin + half ? 0.9 : 0.6));
-  const head = ["Earnings", "Amount (INR)", "Deductions", "Amount (INR)"];
-  head.forEach((label, i) => {
-    const w = i % 2 ? amtW : nameW;
-    c.cell(label, colX[i], y, w, lineH, { size: 8.5, font: bold, align: i % 2 ? "right" : "left" });
-  });
+  [...earnCols.slice(1), ...dedCols].forEach(({ x }) => c.vline(x, y, y - tableH));
+  const earnHead = showRate ? ["Earnings", "Full Month", "Earned"] : ["Earnings", "Amount (INR)"];
+  earnHead.forEach((label, i) => c.cell(label, earnCols[i].x, y, earnCols[i].w, lineH, { font: bold, align: i ? "right" : "left" }));
+  ["Deductions", "Amount (INR)"].forEach((label, i) => c.cell(label, dedCols[i].x, y, dedCols[i].w, lineH, { font: bold, align: i ? "right" : "left" }));
   let lineTop = y - lineH;
   for (let i = 0; i < lines; i += 1) {
     const e = earningRows[i];
     const d = deductionRows[i];
     if (e) {
-      c.cell(e.name, colX[0], lineTop, nameW, lineH);
-      c.cell(amount(e.amount), colX[1], lineTop, amtW, lineH, { align: "right" });
+      c.cell(e.name, earnCols[0].x, lineTop, earnCols[0].w, lineH);
+      if (showRate) c.cell(amount(e.rate ?? e.amount), earnCols[1].x, lineTop, earnCols[1].w, lineH, { align: "right" });
+      const last = earnCols[earnCols.length - 1];
+      c.cell(amount(e.amount), last.x, lineTop, last.w, lineH, { align: "right" });
     }
     if (d) {
-      c.cell(d.name, colX[2], lineTop, nameW, lineH);
-      c.cell(amount(d.amount), colX[3], lineTop, amtW, lineH, { align: "right" });
+      c.cell(d.name, dedCols[0].x, lineTop, dedCols[0].w, lineH);
+      c.cell(amount(d.amount), dedCols[1].x, lineTop, dedCols[1].w, lineH, { align: "right" });
     }
     lineTop -= lineH;
   }
-  c.cell("Total Earnings", colX[0], lineTop, nameW, lineH, { font: bold });
-  c.cell(amount(totalEarnings), colX[1], lineTop, amtW, lineH, { font: bold, align: "right" });
-  c.cell("Total Deductions", colX[2], lineTop, nameW, lineH, { font: bold });
-  c.cell(amount(totalDeductions), colX[3], lineTop, amtW, lineH, { font: bold, align: "right" });
+  c.cell("Gross Earnings", earnCols[0].x, lineTop, earnCols[0].w, lineH, { font: bold });
+  if (showRate) c.cell(amount(totalRate), earnCols[1].x, lineTop, earnCols[1].w, lineH, { font: bold, align: "right" });
+  const lastEarn = earnCols[earnCols.length - 1];
+  c.cell(amount(totalEarnings), lastEarn.x, lineTop, lastEarn.w, lineH, { font: bold, align: "right" });
+  c.cell("Total Deductions", dedCols[0].x, lineTop, dedCols[0].w, lineH, { font: bold });
+  c.cell(amount(totalDeductions), dedCols[1].x, lineTop, dedCols[1].w, lineH, { font: bold, align: "right" });
   y -= tableH;
 
-  // ── Net pay band ───────────────────────────────────────────────────────
-  const netH = 40;
-  y -= 8;
-  c.rect(margin, y, contentWidth, netH, { fill: COLORS.brandSoft, border: COLORS.brand, borderWidth: 0.9 });
-  c.text(isEmployee ? "NET PAY (Take Home)" : "NET PAYABLE", margin + 10, y - 16, { size: 10, font: bold });
-  c.text(`INR ${amount(input.netPay)}`, right - 10, y - 17, { size: 13, font: bold, align: "right" });
-  c.text(`Amount in words: ${inrWords(input.netPay)}`, margin + 10, y - 31, { size: 8, font: italic, color: COLORS.muted, maxWidth: contentWidth - 20 });
-  y -= netH + 14;
+  // ── Net pay (continues the salary table) ───────────────────────────────
+  const netH = 20;
+  const wordsH = 16;
+  c.rect(margin, y, contentWidth, netH + wordsH, { border: COLORS.border });
+  c.rect(margin, y, contentWidth, netH, { fill: COLORS.headFill });
+  c.hline(margin, right, y - netH);
+  c.cell("Net Pay (Gross Earnings - Total Deductions)", margin, y, contentWidth - 160, netH, { size: 9.5, font: bold });
+  c.cell(`INR ${amount(input.netPay)}`, right - 160, y, 160, netH, { size: 11, font: bold, align: "right" });
+  c.cell(`Net Pay in Words: ${inrWords(input.netPay)}`, margin, y - netH, contentWidth, wordsH, { size: 8.5 });
+  y -= netH + wordsH + 12;
 
-  // ── Employer contribution + signatory ──────────────────────────────────
-  const signTop = y;
+  // ── Employer contributions ─────────────────────────────────────────────
   if (employerItems.length) {
     const ecH = 14;
-    const ecW = half - 12;
-    const ecAmtW = amtW;
+    const ecW = half;
     const ecTableH = ecH * (employerItems.length + 2);
+    sectionHeading("Employer Contributions");
     c.rect(margin, y, ecW, ecH, { fill: COLORS.headFill });
     c.rect(margin, y - ecH * (employerItems.length + 1), ecW, ecH, { fill: COLORS.headFill });
     c.rect(margin, y, ecW, ecTableH, { border: COLORS.border });
     c.hline(margin, margin + ecW, y - ecH);
     c.hline(margin, margin + ecW, y - ecH * (employerItems.length + 1));
-    c.vline(margin + ecW - ecAmtW, y, y - ecTableH);
-    c.cell("Employer Contribution", margin, y, ecW - ecAmtW, ecH, { size: 8.5, font: bold });
-    c.cell("Amount (INR)", margin + ecW - ecAmtW, y, ecAmtW, ecH, { size: 8.5, font: bold, align: "right" });
+    c.vline(margin + ecW - amtW, y, y - ecTableH);
+    c.cell("Contribution", margin, y, ecW - amtW, ecH, { font: bold });
+    c.cell("Amount (INR)", margin + ecW - amtW, y, amtW, ecH, { font: bold, align: "right" });
     let ecTop = y - ecH;
     for (const item of employerItems) {
-      c.cell(item.name, margin, ecTop, ecW - ecAmtW, ecH);
-      c.cell(amount(item.amount), margin + ecW - ecAmtW, ecTop, ecAmtW, ecH, { align: "right" });
+      c.cell(item.name, margin, ecTop, ecW - amtW, ecH);
+      c.cell(amount(item.amount), margin + ecW - amtW, ecTop, amtW, ecH, { align: "right" });
       ecTop -= ecH;
     }
-    c.cell("Total", margin, ecTop, ecW - ecAmtW, ecH, { font: bold });
-    c.cell(amount(employerItems.reduce((sum, item) => sum + Number(item.amount || 0), 0)), margin + ecW - ecAmtW, ecTop, ecAmtW, ecH, { font: bold, align: "right" });
-    c.text("Employer contributions are not part of take-home pay.", margin, y - ecTableH - 10, { size: 7, font: italic, color: COLORS.muted });
+    c.cell("Total", margin, ecTop, ecW - amtW, ecH, { font: bold });
+    c.cell(amount(employerItems.reduce((sum, item) => sum + Number(item.amount || 0), 0)), margin + ecW - amtW, ecTop, amtW, ecH, { font: bold, align: "right" });
+    y -= ecTableH + 12;
   }
-  c.text(`for ${company.toUpperCase()}`, right, signTop - 10, { size: 9, font: bold, align: "right", maxWidth: half - 12 });
-  c.hline(right - 140, right, signTop - 46, COLORS.border, 0.5);
-  c.text(input.authorisedSignatory || "Authorised Signatory", right, signTop - 58, { size: 8.5, align: "right", maxWidth: half - 12 });
 
   // ── Footer ─────────────────────────────────────────────────────────────
   const footerY = 30;
   c.hline(margin, right, footerY + 12, COLORS.border, 0.5);
-  const footerText = input.footerText || "This is a system-generated document from the locked payroll snapshot and does not require a signature.";
+  const footerText = input.footerText || `This is a computer-generated ${isEmployee ? "payslip" : "statement"} and does not require a signature.`;
   wrap(safe(footerText), regular, 7, contentWidth - 205)
     .slice(0, 2)
     .forEach((lineText, index) => c.text(lineText, margin, footerY - index * 9, { size: 7, color: COLORS.muted }));
